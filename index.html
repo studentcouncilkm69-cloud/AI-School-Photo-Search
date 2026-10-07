@@ -1,0 +1,404 @@
+<!DOCTYPE html>
+<html lang="th">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+    <meta name="theme-color" content="#ffffff">
+    <title>AI Photo Search | ค้นหารูปด้วยใบหน้า</title>
+    
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://unpkg.com/react@18/umd/react.production.min.js" crossorigin></script>
+    <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js" crossorigin></script>
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    <script src="https://unpkg.com/@phosphor-icons/web"></script>
+    
+    <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+Thai:wght@300;400;500;600;700;900&family=Sarabun:wght@400;500;600;700&display=swap" rel="stylesheet">
+    
+    <style>
+        html, body { 
+            font-family: 'Noto Sans Thai', sans-serif !important; 
+            background-color: #E5E7EB;
+            overscroll-behavior: none; 
+            height: 100dvh;
+            width: 100%;
+            overflow: hidden;
+            color: #1F2937;
+        }
+        #root { height: 100dvh; width: 100%; display: flex; flex-direction: column; }
+        .custom-scrollbar::-webkit-scrollbar { width: 6px; height: 6px; }
+        .custom-scrollbar::-webkit-scrollbar-track { background: transparent; }
+        .custom-scrollbar::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 6px; }
+        @keyframes scan-line {
+            0% { top: 0%; opacity: 0; }
+            10% { opacity: 1; }
+            90% { opacity: 1; }
+            100% { top: 100%; opacity: 0; }
+        }
+        .animate-scan-line { animation: scan-line 2.5s ease-in-out infinite; }
+        .glass-effect { background: rgba(255, 255, 255, 0.85); backdrop-filter: blur(12px); }
+    </style>
+</head>
+<body>
+    <div id="root"></div>
+
+    <script type="text/babel">
+        const { useState, useEffect, useMemo, useRef } = React;
+
+        // ⚠️ ลิงก์ Web App ของ Google Apps Script (เปลี่ยนเป็นลิงก์ของคุณเมื่อ Deploy)
+        const GOOGLE_SCRIPT_URL = "https://script.google.com/macros/s/AKfycbzwHJz5CNQCIvZmynTHukIYpO2sO_Wd0VotW_DjTt3xUDgPO95koHP2dbBEtKP7KOL-/exec";
+
+        const DEFAULT_LOGO = "https://i.postimg.cc/wBN5btrp/rong-re-yn-kham-wng.png";
+        
+        function App() {
+            const [appMode, setAppMode] = useState('guest'); 
+            const [currentRoute, setCurrentRoute] = useState('search'); 
+            const [showSplash, setShowSplash] = useState(true);
+            const [isSyncing, setIsSyncing] = useState(false);
+            const [toast, setToast] = useState({ msg: '', type: '' });
+
+            const [settings, setSettings] = useState({ 
+                app_title: "AI Photo Search", 
+                school_name: "โรงเรียน...", 
+                logo_url: DEFAULT_LOGO,
+                master_passcode: "9999",
+                ai_threshold: 0.85
+            });
+            const [activities, setActivities] = useState([]);
+            
+            // State สำหรับหน้าค้นหา
+            const [uploadedFaceFile, setUploadedFaceFile] = useState(null);
+            const [uploadedFacePreview, setUploadedFacePreview] = useState(null);
+            const [isSearching, setIsSearching] = useState(false);
+            const [searchResults, setSearchResults] = useState([]);
+            const [hasSearched, setHasSearched] = useState(false);
+            const fileInputRef = useRef(null);
+
+            // State สำหรับ Admin
+            const [loginModalOpen, setLoginModalOpen] = useState(false);
+            const [passcodeInput, setPasscodeInput] = useState('');
+
+            // Filters
+            const [filterYear, setFilterYear] = useState('all');
+            const [filterActivity, setFilterActivity] = useState('all');
+            const [selectedPhoto, setSelectedPhoto] = useState(null);
+
+            useEffect(() => {
+                handleSync();
+            }, []);
+
+            const showToastMsg = (msg, type = 'info') => {
+                setToast({ msg, type });
+                setTimeout(() => setToast({ msg: '', type: '' }), 3000);
+            };
+
+            const handleSync = async () => {
+                setIsSyncing(true);
+                try {
+                    // เรียกข้อมูลจาก Google Apps Script
+                    const response = await fetch(`${GOOGLE_SCRIPT_URL}?action=getInitialData`);
+                    const data = await response.json();
+                    if(data.status === 'Success') {
+                        if(data.settings) setSettings(prev => ({...prev, ...data.settings}));
+                        if(data.activities) setActivities(data.activities);
+                        showToastMsg('โหลดข้อมูลสำเร็จ', 'success');
+                    }
+                } catch (e) {
+                    console.log("Offline mode or Fetch Error");
+                    // Mock Data กรณีเชื่อมต่อไม่ได้
+                    setActivities([
+                        { id: 'a1', title: 'กีฬาสีประจำปี', date: '2026-11-15', academicYear: '2569', photoCount: 450, status: 'Completed' }
+                    ]);
+                } finally {
+                    setIsSyncing(false);
+                    setShowSplash(false);
+                }
+            };
+
+            const handleFaceUpload = (e) => {
+                const file = e.target.files[0];
+                if (!file) return;
+                setUploadedFaceFile(file);
+                const reader = new FileReader();
+                reader.onload = (event) => {
+                    setUploadedFacePreview(event.target.result);
+                    setHasSearched(false);
+                    setSearchResults([]);
+                };
+                reader.readAsDataURL(file);
+            };
+
+            const startAiSearch = async () => {
+                if (!uploadedFaceFile) return;
+                setIsSearching(true);
+                
+                // สมมติการส่งรูปไปให้หลังบ้านค้นหา
+                setTimeout(() => {
+                    // สร้าง Mock Results
+                    const results = Array.from({length: 12}).map((_, i) => ({
+                        id: `p_${i}`,
+                        activityTitle: 'กีฬาสีประจำปี',
+                        albumName: 'ภาพบรรยากาศรวม',
+                        date: '2026-11-15',
+                        academicYear: '2569',
+                        url: `https://picsum.photos/id/${100 + i}/800/600`,
+                        thumbnailUrl: `https://picsum.photos/id/${100 + i}/400/300`,
+                        confidence: (0.80 + (Math.random() * 0.19)).toFixed(2)
+                    }));
+                    
+                    setSearchResults(results);
+                    setHasSearched(true);
+                    setIsSearching(false);
+                    setCurrentRoute('gallery');
+                    showToastMsg(`พบ ${results.length} รูปภาพที่คล้ายคลึง`, 'success');
+                }, 2500);
+            };
+
+            const handleLogin = (e) => {
+                e.preventDefault();
+                if(passcodeInput === settings.master_passcode) {
+                    setAppMode('admin');
+                    setCurrentRoute('admin_dashboard');
+                    setLoginModalOpen(false);
+                    setPasscodeInput('');
+                    showToastMsg('เข้าสู่ระบบแอดมิน', 'success');
+                } else {
+                    showToastMsg('รหัสผ่านไม่ถูกต้อง', 'error');
+                }
+            };
+
+            const filteredResults = useMemo(() => {
+                return searchResults.filter(photo => {
+                    let matchConfidence = parseFloat(photo.confidence) >= (settings.ai_threshold || 0.80);
+                    return matchConfidence;
+                });
+            }, [searchResults, settings.ai_threshold]);
+
+            if (showSplash) return <div className="flex h-screen items-center justify-center bg-gray-100"><i className="ph ph-spinner animate-spin text-4xl text-[#C8102E]"></i></div>;
+
+            return (
+                <div className="flex flex-col h-[100dvh] bg-[#F3F4F6] relative">
+                    {/* Header */}
+                    <header className="bg-white border-b border-gray-200 h-16 px-4 flex items-center justify-between shrink-0 z-40 shadow-sm sticky top-0">
+                        <div className="flex items-center gap-3 cursor-pointer" onClick={() => setCurrentRoute(appMode==='guest'?'search':'admin_dashboard')}>
+                            <img src={settings.logo_url} className="w-10 h-10 object-contain" />
+                            <div>
+                                <h1 className="font-bold text-[#C8102E] leading-tight text-sm sm:text-base">{settings.app_title}</h1>
+                                <p className="text-[10px] text-gray-500 tracking-wider">{settings.school_name}</p>
+                            </div>
+                        </div>
+
+                        <div className="flex items-center gap-2">
+                            <button onClick={handleSync} className="w-9 h-9 rounded-full bg-gray-50 text-gray-500 hover:bg-gray-100 flex items-center justify-center">
+                                <i className={`ph ph-arrows-clockwise text-lg ${isSyncing ? "animate-spin text-[#C8102E]" : ""}`}></i>
+                            </button>
+                            {appMode === 'guest' ? (
+                                <button onClick={() => setLoginModalOpen(true)} className="px-4 py-2 rounded-xl bg-gray-900 text-white hover:bg-black font-bold text-xs flex items-center gap-1.5">
+                                    <i className="ph ph-lock-key text-sm"></i> <span className="hidden sm:inline">Admin</span>
+                                </button>
+                            ) : (
+                                <button onClick={() => {setAppMode('guest'); setCurrentRoute('search');}} className="w-9 h-9 rounded-xl bg-gray-100 text-gray-600 hover:bg-red-50 hover:text-[#C8102E] flex items-center justify-center">
+                                    <i className="ph ph-sign-out text-lg"></i>
+                                </button>
+                            )}
+                        </div>
+                    </header>
+
+                    {/* Main Content */}
+                    <main className="flex-1 overflow-y-auto custom-scrollbar p-4 sm:p-6 lg:p-8 w-full max-w-5xl mx-auto">
+                        
+                        {/* Guest: Search Mode */}
+                        {appMode === 'guest' && currentRoute === 'search' && (
+                            <div className="max-w-3xl mx-auto py-8 animate-in fade-in slide-in-from-bottom-4">
+                                <div className="text-center mb-8">
+                                    <div className="inline-flex p-3 bg-red-50 rounded-2xl mb-4 text-[#C8102E]"><i className="ph ph-face-id text-4xl"></i></div>
+                                    <h2 className="text-3xl font-black text-gray-800 tracking-tight mb-2">ค้นหารูปกิจกรรมด้วย AI</h2>
+                                    <p className="text-gray-500 text-sm">อัปโหลดรูปหน้าตรงของคุณ เพื่อค้นหารูปจากทุกกิจกรรม</p>
+                                </div>
+
+                                <div className="bg-white rounded-[2rem] p-6 shadow-xl border border-gray-100">
+                                    <div className="flex flex-col md:flex-row gap-8 items-center">
+                                        <div className="w-full md:w-1/2">
+                                            {!uploadedFacePreview ? (
+                                                <label className="w-full aspect-square max-w-sm mx-auto rounded-3xl border-2 border-dashed border-gray-300 bg-gray-50 hover:bg-red-50/50 flex flex-col items-center justify-center cursor-pointer transition-all">
+                                                    <div className="w-16 h-16 rounded-full bg-white shadow-sm flex items-center justify-center mb-4"><i className="ph ph-upload-simple text-2xl text-gray-400"></i></div>
+                                                    <h3 className="font-bold text-gray-700">อัปโหลดใบหน้า</h3>
+                                                    <input type="file" accept="image/*" onChange={handleFaceUpload} className="hidden" />
+                                                </label>
+                                            ) : (
+                                                <div className="w-full aspect-square max-w-sm mx-auto relative rounded-3xl overflow-hidden shadow-md border-4 border-white">
+                                                    <img src={uploadedFacePreview} className="w-full h-full object-cover" />
+                                                    {isSearching && <div className="absolute inset-0 bg-blue-500/20 z-10 animate-scan-line border-b-4 border-blue-400 shadow-[0_4px_15px_rgba(59,130,246,0.5)]"></div>}
+                                                    {!isSearching && (
+                                                        <button onClick={() => setUploadedFacePreview(null)} className="absolute bottom-4 left-1/2 -translate-x-1/2 bg-white text-[#C8102E] px-4 py-2 rounded-xl font-bold text-xs shadow-lg">
+                                                            เปลี่ยนรูป
+                                                        </button>
+                                                    )}
+                                                </div>
+                                            )}
+                                        </div>
+                                        <div className="w-full md:w-1/2 flex flex-col justify-center">
+                                            <button 
+                                                onClick={startAiSearch}
+                                                disabled={!uploadedFaceFile || isSearching}
+                                                className={`w-full py-4 rounded-2xl font-black text-sm sm:text-base shadow-lg transition-all flex items-center justify-center gap-2 ${!uploadedFaceFile ? 'bg-gray-100 text-gray-400' : isSearching ? 'bg-blue-600 text-white animate-pulse' : 'bg-[#C8102E] hover:bg-red-800 text-white'}`}
+                                            >
+                                                {isSearching ? <><i className="ph ph-spinner animate-spin text-xl"></i>กำลังเปรียบเทียบใบหน้า...</> : <><i className="ph ph-scan text-xl"></i>เริ่มค้นหาด้วย AI</>}
+                                            </button>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                        )}
+
+                        {/* Guest: Gallery Mode */}
+                        {appMode === 'guest' && currentRoute === 'gallery' && (
+                            <div className="animate-in fade-in">
+                                <div className="flex justify-between items-center mb-6">
+                                    <div>
+                                        <h2 className="text-xl font-black text-gray-800 flex items-center gap-2"><i className="ph ph-images text-[#C8102E]"></i> ผลการค้นหา</h2>
+                                        <p className="text-xs font-medium text-gray-500 mt-1">พบ {filteredResults.length} รูปภาพ</p>
+                                    </div>
+                                    <button onClick={() => setCurrentRoute('search')} className="bg-gray-100 text-gray-600 hover:bg-gray-200 px-3 py-2 rounded-xl text-xs font-bold flex items-center gap-1">
+                                        <i className="ph ph-arrow-left"></i> ค้นหาใหม่
+                                    </button>
+                                </div>
+
+                                <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-4">
+                                    {filteredResults.map((photo) => (
+                                        <div key={photo.id} onClick={() => setSelectedPhoto(photo)} className="bg-white rounded-2xl overflow-hidden shadow-sm hover:shadow-md cursor-pointer border border-gray-100 transition-all">
+                                            <div className="aspect-[4/3] relative overflow-hidden bg-gray-100">
+                                                <img src={photo.thumbnailUrl} className="w-full h-full object-cover" loading="lazy" />
+                                                <div className="absolute top-2 right-2 glass-effect rounded-lg px-2 py-1 shadow-sm flex items-center gap-1">
+                                                    <i className="ph ph-target text-[#C8102E] text-[10px]"></i>
+                                                    <span className="text-[9px] font-black text-gray-800">{(photo.confidence * 100).toFixed(0)}%</span>
+                                                </div>
+                                            </div>
+                                            <div className="p-3">
+                                                <h4 className="font-bold text-gray-800 text-xs truncate mb-1">{photo.activityTitle}</h4>
+                                                <p className="text-[10px] text-gray-500 truncate">{photo.date}</p>
+                                            </div>
+                                        </div>
+                                    ))}
+                                </div>
+                            </div>
+                        )}
+
+                        {/* Admin: Dashboard */}
+                        {appMode === 'admin' && currentRoute === 'admin_dashboard' && (
+                            <div className="animate-in fade-in space-y-6">
+                                <div className="flex gap-2 mb-4">
+                                    <button onClick={() => setCurrentRoute('admin_dashboard')} className={`px-4 py-2 rounded-xl text-xs font-bold ${currentRoute==='admin_dashboard'?'bg-[#C8102E] text-white':'bg-white text-gray-600'}`}>แดชบอร์ด</button>
+                                    <button onClick={() => setCurrentRoute('admin_import')} className={`px-4 py-2 rounded-xl text-xs font-bold ${currentRoute==='admin_import'?'bg-[#C8102E] text-white':'bg-white text-gray-600'}`}>นำเข้ารูป</button>
+                                    <button onClick={() => setCurrentRoute('admin_settings')} className={`px-4 py-2 rounded-xl text-xs font-bold ${currentRoute==='admin_settings'?'bg-[#C8102E] text-white':'bg-white text-gray-600'}`}>ตั้งค่า</button>
+                                </div>
+
+                                <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+                                    <div className="bg-white p-5 rounded-2xl shadow-sm border border-gray-100">
+                                        <span className="block text-2xl font-black text-gray-800">12,450</span>
+                                        <span className="text-[10px] font-bold text-gray-500">รูปภาพในระบบ</span>
+                                    </div>
+                                    <div className="bg-white p-5 rounded-2xl shadow-sm border border-gray-100">
+                                        <span className="block text-2xl font-black text-gray-800">35,210</span>
+                                        <span className="text-[10px] font-bold text-gray-500">ใบหน้าที่พบ (Vectors)</span>
+                                    </div>
+                                </div>
+
+                                <div className="bg-white rounded-2xl shadow-sm border border-gray-100 overflow-hidden">
+                                    <div className="p-4 border-b border-gray-100 bg-gray-50 flex justify-between">
+                                        <h3 className="font-bold text-gray-800 text-sm">กิจกรรมล่าสุด</h3>
+                                    </div>
+                                    <div className="p-4">
+                                        {activities.length === 0 ? <p className="text-xs text-gray-400">ยังไม่มีข้อมูลกิจกรรม</p> : (
+                                            activities.map(act => (
+                                                <div key={act.id} className="flex justify-between items-center py-2 border-b border-gray-50">
+                                                    <div>
+                                                        <p className="font-bold text-sm text-gray-800">{act.title}</p>
+                                                        <p className="text-[10px] text-gray-500">วันที่: {act.date}</p>
+                                                    </div>
+                                                    <span className="px-2 py-1 bg-emerald-50 text-emerald-600 text-[10px] font-bold rounded-lg border border-emerald-100">
+                                                        นำเข้าแล้ว {act.photoCount} รูป
+                                                    </span>
+                                                </div>
+                                            ))
+                                        )}
+                                    </div>
+                                </div>
+                            </div>
+                        )}
+
+                        {/* Admin: Import */}
+                        {appMode === 'admin' && currentRoute === 'admin_import' && (
+                            <div className="bg-white p-6 rounded-[2rem] shadow-sm border border-gray-100 animate-in fade-in max-w-2xl mx-auto">
+                                <h2 className="text-lg font-black text-gray-800 mb-6 flex items-center gap-2"><i className="ph ph-download-simple text-[#C8102E]"></i> นำเข้ารูปภาพใหม่</h2>
+                                <div className="space-y-4">
+                                    <div>
+                                        <label className="text-xs font-bold text-gray-600 block mb-1">ชื่อกิจกรรม / อัลบั้ม</label>
+                                        <input type="text" className="w-full p-3 rounded-xl border border-gray-200 bg-gray-50 outline-none focus:border-[#C8102E]" placeholder="เช่น กีฬาสี 2569" />
+                                    </div>
+                                    <div>
+                                        <label className="text-xs font-bold text-gray-600 block mb-1">ลิงก์อัลบั้ม Facebook / โฟลเดอร์ Drive</label>
+                                        <input type="text" className="w-full p-3 rounded-xl border border-gray-200 bg-gray-50 outline-none focus:border-blue-500" placeholder="https://..." />
+                                    </div>
+                                    <button onClick={() => showToastMsg('ส่งคำสั่งไปหลังบ้านสำเร็จ (Mock)', 'success')} className="w-full py-3.5 bg-[#C8102E] text-white font-bold rounded-xl shadow-md mt-4">
+                                        เริ่มดึงข้อมูลและสกัดใบหน้า (AI)
+                                    </button>
+                                </div>
+                            </div>
+                        )}
+                    </main>
+
+                    {/* Photo Modal */}
+                    {selectedPhoto && (
+                        <div className="fixed inset-0 z-[9999] bg-black/90 backdrop-blur-sm flex items-center justify-center p-4 animate-in fade-in" onClick={() => setSelectedPhoto(null)}>
+                            <div className="bg-white rounded-2xl w-full max-w-4xl flex flex-col md:flex-row overflow-hidden shadow-2xl" onClick={e => e.stopPropagation()}>
+                                <div className="w-full md:w-2/3 bg-black flex items-center justify-center relative">
+                                    <img src={selectedPhoto.url} className="max-w-full max-h-[70vh] object-contain" />
+                                    <button onClick={() => setSelectedPhoto(null)} className="absolute top-4 left-4 md:hidden w-8 h-8 bg-black/50 text-white rounded-full"><i className="ph ph-x"></i></button>
+                                </div>
+                                <div className="w-full md:w-1/3 p-6 flex flex-col justify-between">
+                                    <div>
+                                        <h3 className="text-lg font-black text-gray-800 mb-1">{selectedPhoto.activityTitle}</h3>
+                                        <p className="text-xs text-gray-500 mb-4">{selectedPhoto.date}</p>
+                                        <div className="inline-flex px-3 py-1.5 bg-red-50 text-[#C8102E] rounded-xl text-xs font-bold border border-red-100">
+                                            AI มั่นใจ: {(selectedPhoto.confidence * 100).toFixed(1)}%
+                                        </div>
+                                    </div>
+                                    <div className="mt-6 flex flex-col gap-2">
+                                        <a href={selectedPhoto.url} target="_blank" className="w-full py-3 bg-[#C8102E] text-white text-center rounded-xl text-xs font-bold shadow-md"><i className="ph ph-download-simple"></i> ดาวน์โหลดรูปลงเครื่อง</a>
+                                        <button onClick={() => setSelectedPhoto(null)} className="w-full py-3 bg-gray-100 text-gray-600 rounded-xl text-xs font-bold">ปิด</button>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    )}
+
+                    {/* Login Modal */}
+                    {loginModalOpen && (
+                        <div className="fixed inset-0 z-[9999] bg-gray-900/60 backdrop-blur-sm flex items-center justify-center p-4 animate-in fade-in">
+                            <div className="bg-white rounded-3xl w-full max-w-sm p-6 relative">
+                                <button onClick={() => setLoginModalOpen(false)} className="absolute top-4 right-4 text-gray-400 hover:text-gray-600"><i className="ph ph-x text-lg"></i></button>
+                                <h2 className="text-xl font-black text-center text-gray-800 mb-4">เข้าสู่ระบบ Admin</h2>
+                                <form onSubmit={handleLogin}>
+                                    <input type="password" value={passcodeInput} onChange={e=>setPasscodeInput(e.target.value)} placeholder="รหัสผ่าน (ลอง 9999)" className="w-full p-4 rounded-2xl border border-gray-200 text-center text-xl font-bold tracking-widest outline-none focus:border-[#C8102E] mb-4 bg-gray-50" autoFocus />
+                                    <button type="submit" className="w-full py-3.5 bg-gray-900 text-white rounded-xl font-bold shadow-md hover:bg-black">ยืนยัน</button>
+                                </form>
+                            </div>
+                        </div>
+                    )}
+
+                    {/* Toast */}
+                    {toast.msg && (
+                        <div className="fixed top-6 right-4 z-[99999] bg-gray-900 text-white px-4 py-3 rounded-2xl shadow-xl text-xs font-bold flex items-center gap-2 animate-in fade-in slide-in-from-top-4">
+                            {toast.type === 'success' ? <i className="ph ph-check-circle text-emerald-400 text-lg"></i> : <i className="ph ph-warning-circle text-red-400 text-lg"></i>}
+                            {toast.msg}
+                        </div>
+                    )}
+                </div>
+            );
+        }
+
+        const root = ReactDOM.createRoot(document.getElementById('root'));
+        root.render(<App />);
+    </script>
+</body>
+</html>
